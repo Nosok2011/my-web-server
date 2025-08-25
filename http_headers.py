@@ -13,5 +13,5 @@ class Headers:
 http_ok = Headers(200).generate_http_header()
 http_forbidden = Headers(403).generate_http_header()
 http_not_found = Headers(404).generate_http_header()
-http_error = Headers(500).generate_http_header()
-http_server_is_down = Headers(503).generate_http_header()
+http_internal = Headers(500).generate_http_header()
+http_unavailable = Headers(503).generate_http_header()

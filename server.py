@@ -1,23 +1,23 @@
-#!/usr/bin/python3.13
-import socket
-import http_headers
-import os
-import sys
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+#!/usr/bin/env python3
+from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, SHUT_RDWR
+import config
+from os import chdir, listdir
+from os.path import dirname, abspath, isfile
+from sys import exit
+from traceback import print_exc, format_exc
+from php_server import PHPServer
+from requests import get
+chdir(dirname(abspath(__file__)))
 class Server:
-    def __init__(self, addr="0.0.0.0", port=3000, main_dir="./web", index_file="index.html"):
-        self.srv_addr = addr
-        self.srv_port = port
-        self.main_dir = main_dir
-        self.index_file = index_file
     def start_server(self):
         print("starting server")
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.bind((self.srv_addr, self.srv_port))
+        self.server_sock = socket(AF_INET, SOCK_STREAM)
+        self.server_sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        self.server_sock.bind((config.ip, config.port))
         self.server_sock.listen()
-        all_addrs = True if self.srv_addr == "0.0.0.0" else False
-        print(f"server started on {"all addresses" if all_addrs else self.srv_addr}, port {self.srv_port}")
+        all_addrs = True if config.ip == "0.0.0.0" else False
+        print(f"server started on {"all addresses" if all_addrs else config.ip}, port {config.port}")
+        print("press ctrl+c to stop server")
         self.handle_requests()
     def handle_requests(self):
         self.clients = []
@@ -34,45 +34,71 @@ class Server:
                     del self.clients[self.clients.index(client_sock)]
                     continue
                 print(data)
-                path = self.main_dir + data.split()[1] 
-                print(self.index_file, path)
+                path = config.htdocs + data.split()[1]
                 content = self.get_page(path)
                 client_sock.sendall(content.encode())
-                client_sock.shutdown(socket.SHUT_RDWR)
+                client_sock.shutdown(SHUT_RDWR)
                 client_sock.close()
                 del self.clients[self.clients.index(client_sock)]
         except KeyboardInterrupt:
             self.stop_server()
     def get_page(self, path):
+        path2 = path.replace(config.htdocs, "")
         try:
-            content = open(self.main_dir + path, encoding="UTF-8").read()
-            return http_headers.http_ok + content
-        except FileNotFoundError:
-            print(path)
-            print(os.getcwd())
-            if not path.endswith("favicon.ico"):
-                return http_headers.http_not_found + "<h1>error: file not found</h1>"
-        except PermissionError:
-            return http_headers.http_forbidden + "<h1>error: permisson denied</h1>"
-        except IsADirectoryError: # TODO: добавить проверку на наличие файла index.html и отображение папок и файлов при его отсутствии
-            #if os.path.isfile(path + "/" if not path.endswith("/") else "" + self.index_file):
-            print(path, path + ("/" if not path.endswith("/") else "") + self.index_file, os.path.isfile(path + "/" if not path.endswith("/") else "" + self.index_file))
-            return http_headers.http_error + "<h1>error: tried to open a directory as a file</h1>"
+            with open(path, encoding="UTF-8") as page:
+                if isfile(path) and path.endswith(".php"):
+                    content = self.handle_php(path)
+                else:
+                    content = page.read()
+        except FileNotFoundError as e:
+            print_exc()
+            with open(f"{config.service_dir}/notfound.html", encoding="UTF-8") as notfound:
+                notfound = notfound.read()
+            return config.http_not_found + notfound.replace("{path}", path2)
+        except PermissionError as e:
+            print_exc()
+            with open(f"{config.service_dir}/permdenied.html", encoding="UTF-8") as permdenied:
+                permdenied = permdenied.read()
+            return config.http_forbidden + permdenied.replace("{path}", path2)
+        except IsADirectoryError as e:
+            if isfile(path + "/" + config.index_file):
+                with open(path + "/" + config.index_file) as index:
+                    content = index.read()
+            else:
+                content = self.get_html_files_list(path)
         except Exception as e:
-            return http_headers.http_error + f"<h1>error: unknown error</h1><p>{e}</p>"
+            print_exc()
+            with open(f"{config.service_dir}/internal.html", encoding="UTF-8") as internal:
+                internal = internal.read()
+            return config.http_internal + internal.replace("{err}", format_exc().replace("<", "&lt;").replace(">", "&gt;"))
+        return config.http_ok + content
+    def handle_php(self, path):
+        php = PHPServer()
+        php.start_server()
+        php_handled = get(f"http://localhost:{config.php_port}/{path.replace(config.htdocs, "").lstrip("/")}").text
+        php.stop_server()
+        return php_handled
     def get_html_files_list(self, path):
-        ...
+        with open(f"{config.service_dir}/list_of_files.html", encoding="UTF-8") as tpl_:
+            tpl = tpl_.read() # tpl - template
+        path2 = path.replace(config.htdocs, "")
+        tpl2 = tpl.replace("{dir}", path2)
+        lst = [f"<li><a href=\"{path2}{"/" if not path2.endswith("/") else ""}{file}\">{file}</a></li>" for file in listdir(path)]
+        page = tpl2.replace("{list}", "".join(lst))
+        return page
     def stop_server(self):
         print("stopping server")
         if self.clients:
+            with open(f"{config.service_dir}/shuttingdown.html", encoding="UTF-8") as shuttingdown:
+                shuttingdown = shuttingdown.read()
             print("disconnecting clients")
             for client in self.clients:
-                client.sendall((http_headers.http_server_is_down + "<h1>sorry, the server is shutting down</h1>").encode())
-                client.shutdown(socket.SHUT_RDWR)
+                client.sendall((config.http_unavailable + shuttingdown).encode())
+                client.shutdown(SHUT_RDWR)
                 client.close()
-        self.server_sock.shutdown(socket.SHUT_RDWR)
+        self.server_sock.shutdown(SHUT_RDWR)
         self.server_sock.close()
-        sys.exit()
+        exit()
 if __name__ == "__main__":
     server = Server()
     server.start_server()
